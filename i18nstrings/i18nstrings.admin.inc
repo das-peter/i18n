@@ -5,23 +5,15 @@
 include_once './includes/locale.inc';
 
 /**
- * @file
- * Admin page callbacks for the i18nstrings module.
- */
-function i18nstrings_admin_refresh_page() {
-  $output = '';
-  return drupal_get_form('i18nstrings_admin_refresh');
-}
-
-/**
  * Form callback. Refresh textgroups.
  */
-function i18nstrings_admin_refresh() {
+function i18nstrings_admin_refresh_form() {
+  module_load_include('inc', 'i18nstrings');
   // Select textgroup/s. Just the ones that have a 'refresh callback'
   $groups = module_invoke_all('locale', 'groups');
   unset($groups['default']);
   foreach (array_keys($groups) as $key) {
-    if (!i18nstrings_group_info($key, 'refresh callback')) {
+    if (!i18nstrings_info($key, 'refresh callback')) {
       unset($groups[$key]);
     }
   }
@@ -55,7 +47,7 @@ function i18nstrings_admin_refresh() {
 /**
  * Form submission.
  */
-function i18nstrings_admin_refresh_submit($form, &$form_state) {
+function i18nstrings_admin_refresh_form_submit($form, &$form_state) {
   $op = isset($form_state['values']['op']) ? $form_state['values']['op'] : '';
   $groups = array_filter($form_state['values']['groups']);
   $languages = array_filter($form_state['values']['languages']);
@@ -121,6 +113,7 @@ function i18nstrings_admin_update($language, $groups) {
  * This has serious security implications so this form needs the 'administer filters' permission
  */
 function i18nstrings_admin_settings() {
+  module_load_include('inc', 'i18nstrings');
   include_once './includes/locale.inc';
   // As the user has administer filters permissions we get a full list here
   foreach (filter_formats() as $fid => $format) {
@@ -137,7 +130,7 @@ function i18nstrings_admin_settings() {
   $textgroups = module_invoke_all('locale', 'groups');
   unset($textgroups['default']);
   foreach (array_keys($textgroups) as $group) {
-    $format = i18nstrings_group_info($group, 'format');
+    $format = i18nstrings_info($group, 'format');
     if (isset($format)) {
       // This one already has format information, so remove from list
       unset($textgroups[$group]);
@@ -159,4 +152,47 @@ function i18nstrings_admin_settings() {
   }
   $form['array_filter'] = array('#type' => 'value', '#value' => TRUE);
   return system_settings_form($form);
+}
+
+/**
+ * Refresh all user defined strings for a given text group.
+ *
+ * @param $group
+ *   Text group to refresh
+ * @param $delete
+ *   Optional, delete existing (but not refresed, strings and translations)
+ * @return Boolean
+ *   True if the strings have been refreshed successfully. False otherwise.
+ */
+function i18nstrings_refresh_group($group, $delete = FALSE) {
+  // Check for the refresh callback
+  $refresh_callback = i18nstrings_info($group, 'refresh callback');
+  if (!$refresh_callback) {
+    return FALSE;
+  }
+  // Mark data on locales_source setting version = 0
+  db_update('locales_source')
+    ->fields(array('version' => 0))
+    ->condition('textgroup', $group)
+    ->execute();
+
+  $result = call_user_func($refresh_callback);
+
+  // Now delete all source strings that were not refreshed (they don't have a row in i18n_strings)
+  if ($result && $delete) {
+    $lids = db_select('locales_source', 's')
+      ->fields('s', array('lid'))
+      ->condition('textgroup', $group)
+      ->condition('version', 0)
+      ->execute()
+      ->fetchCol();
+
+    if ($lids) {
+      drupal_set_message(t('Performing cleanup for text group %textgroup, deleting @count left over strings.', array('%textgroup' => $group, '@count' => count($lids))));
+      db_delete('locales_target')->condition('lid', $lids)->execute();
+      db_delete('locales_source')->condition('lid', $lids)->execute();
+      db_delete('i18n_strings')->condition('lid', $lids)->execute();    
+    }
+  }
+  return $result;
 }
